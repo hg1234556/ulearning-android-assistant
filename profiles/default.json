@@ -1,0 +1,10 @@
+{
+  "package": "cn.ulearning.yxy",
+  "actions": {
+    "next_page": { "text": "下一页" },
+    "play": { "description": "播放" },
+    "speed_menu": { "text": "倍速" },
+    "speed_1_5": { "text": "1.5倍" },
+    "speed_2": { "text": "2.0倍" }
+  }
+}
