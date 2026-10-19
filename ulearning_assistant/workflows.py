@@ -47,6 +47,8 @@ STOP_MESSAGES = {
     "device_error": "读取或操作设备失败。",
     "export_error": "保存页面文件失败。",
     "callback_error": "页面进度回调失败，已停止。",
+    "opaque_webview": "当前 WebView 没有提供可读取的文字。文档阅读请使用“求是读书”的图像识别模式。",
+    "reader_page": "检测到文档阅读器，请使用“求是读书”的文档内翻页，避免跳到下一本书。",
 }
 
 
@@ -168,6 +170,9 @@ def _blocked_page(nodes: tuple[UiNode, ...]) -> str | None:
     values = _visible_text(nodes)
     normalized = [re.sub(r"\s+", "", value).casefold() for value in values]
     joined = "\n".join(normalized)
+    if (any(re.fullmatch(r"\d+[/／]\d+", value) for value in normalized)
+            and "返回课程章节" in joined and "展开目录" in joined):
+        return "reader_page"
     login = any(value in {"登录", "登陆", "login", "signin"} for value in normalized)
     credentials = any(word in joined for word in ("密码", "验证码", "账号", "学号", "手机号", "password", "username"))
     if any(node.password for node in nodes) or (login and credentials):
@@ -217,6 +222,8 @@ class Inspector:
             raise WorkflowError("device_error", str(exc)) from exc
         if not nodes:
             raise WorkflowError("wrong_app")
+        if not _visible_text(nodes) and any(node.class_name == "android.webkit.WebView" for node in nodes):
+            raise WorkflowError("opaque_webview")
         blocked = _blocked_page(nodes)
         if blocked:
             raise WorkflowError(blocked)

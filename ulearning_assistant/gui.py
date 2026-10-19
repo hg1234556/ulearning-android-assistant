@@ -15,12 +15,27 @@ import webbrowser
 from . import __version__
 from .core import AdbClient
 from .demo import DemoClient
+from .reader import VisualReader
 from .workflows import Inspector, PageCollector, Profile
 
 
 ACTION_NAMES = {
     "next_page": "下一页", "play": "播放", "speed_menu": "打开倍速菜单",
     "speed_1_5": "选择 1.5 倍", "speed_2": "选择 2 倍",
+}
+
+READER_STOP_NAMES = {
+    "duration_limit": "到达本地时限", "turn_limit": "到达翻页次数上限",
+    "cancelled": "已手动停止", "page_boundary": "到达文档首页或末页",
+    "wrong_app": "优学院已离开前台", "book_changed": "当前文档已变化",
+    "stale_state": "书名或页码已变化", "layout_changed": "画面尺寸与校准不一致",
+    "recognition_failed": "本地识别失败", "title_missing": "书名识别不明确",
+    "page_missing": "页码识别不明确", "page_timeout": "单次翻页未获确认",
+    "unexpected_page": "实际翻页超出单页范围", "device_error": "设备连接出错",
+    "callback_error": "阅读状态显示失败", "configuration": "阅读参数或校准配置无效",
+    "platform_paused": "平台提示走神，阅读已暂停", "resume_limit": "到达走神恢复次数上限",
+    "resume_timeout": "恢复后未确认弹窗关闭", "pause_missing": "未识别到可处理的走神弹窗",
+    "pause_ambiguous": "走神弹窗的恢复按钮不唯一或不可确认",
 }
 
 
@@ -41,6 +56,8 @@ class AssistantApp:
         self.events: queue.Queue = queue.Queue()
         self.busy = False
         self.cancel_event = threading.Event()
+        self.reader_cancel_event = threading.Event()
+        self.reader_state = None
         self.client = None
         self.inspector = None
         self.snapshot = None
@@ -57,6 +74,13 @@ class AssistantApp:
         self.page_limit = tk.StringVar(value="10")
         self.interval_var = tk.StringVar(value="3")
         self.timeout_var = tk.StringVar(value="120")
+        self.reader_state_var = tk.StringVar(value="尚未识别 · 在优学院中打开文档后，点击“识别阅读器”")
+        self.reader_progress_var = tk.StringVar(value="本地确认计时 0 秒 · 文档翻页 0 次 · 走神恢复 0 次 · 平台阅读学时未确认")
+        self.reader_duration_var = tk.StringVar(value="300")
+        self.reader_interval_var = tk.StringVar(value="30")
+        self.reader_turns_var = tk.StringVar(value="10")
+        self.reader_auto_resume_var = tk.BooleanVar(value=True)
+        self.reader_max_resumes_var = tk.StringVar(value="10")
         self.task_buttons: list[ttk.Button] = []
         self.config_widgets: list[ttk.Widget] = []
         self._configure_style()
@@ -126,9 +150,11 @@ class AssistantApp:
         notebook.pack(fill="both", expand=True)
         page_tab = ttk.Frame(notebook, padding=12)
         action_tab = ttk.Frame(notebook, padding=14)
+        reader_tab = ttk.Frame(notebook, padding=14)
         guide_tab = ttk.Frame(notebook, padding=18)
         notebook.add(page_tab, text="页面与资料")
         notebook.add(action_tab, text="操作与采集")
+        notebook.add(reader_tab, text="求是读书")
         notebook.add(guide_tab, text="使用说明")
 
         toolbar = ttk.Frame(page_tab)
@@ -190,10 +216,63 @@ class AssistantApp:
         ttk.Label(collection, text="从你打开的当前页开始。重复页、找不到唯一的下一页按钮或进入登录/测验等页面时停止。",
                   wraplength=970, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
 
+        reader_status = ttk.LabelFrame(reader_tab, text="当前文档", padding=12)
+        reader_status.pack(fill="x")
+        ttk.Label(reader_status, textvariable=self.reader_state_var, wraplength=960,
+                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        reader_row = ttk.Frame(reader_status)
+        reader_row.pack(fill="x", pady=(12, 0))
+        self.button(reader_row, "识别阅读器", self.inspect_reader, accent=True,
+                    side="left", padx=(0, 8))
+        self.button(reader_row, "文档上一页", lambda: self.move_reader(-1),
+                    side="left", padx=(0, 8))
+        self.button(reader_row, "文档下一页", lambda: self.move_reader(1), side="left")
+        self.button(reader_row, "处理当前走神弹窗", self.resume_reader, side="left", padx=(8, 0))
+        ttk.Label(reader_status,
+                  text="使用 Windows 本地 OCR 识别书名与 PDF 页码，只操作文档上方工具栏内的翻页按钮。\n"
+                       "已验证布局为 1920 × 1080；设备画面尺寸或页面变化后会停止。底部“下一页”可能切换书籍，请勿作为文档翻页。",
+                  wraplength=960, style="Muted.TLabel").pack(anchor="w", pady=(12, 0))
+
+        reader_session = ttk.LabelFrame(reader_tab, text="本地阅读计时与间隔翻页", padding=12)
+        reader_session.pack(fill="x", pady=(16, 0))
+        reader_row = ttk.Frame(reader_session)
+        reader_row.pack(fill="x")
+        for text, variable in [("总时长（秒）", self.reader_duration_var),
+                               ("翻页间隔（秒）", self.reader_interval_var),
+                               ("最多翻页次数", self.reader_turns_var)]:
+            ttk.Label(reader_row, text=text).pack(side="left", padx=(0, 6))
+            entry = ttk.Entry(reader_row, textvariable=variable, width=7)
+            entry.pack(side="left", padx=(0, 14))
+            self.config_widgets.append(entry)
+        self.button(reader_row, "开始计时并翻页", self.start_reader, accent=True,
+                    side="left", padx=(0, 8))
+        self.reader_stop_button = ttk.Button(reader_row, text="停止读书", command=self.stop_reader,
+                                            state="disabled")
+        self.reader_stop_button.pack(side="left")
+        pause_row = ttk.Frame(reader_session)
+        pause_row.pack(fill="x", pady=(10, 0))
+        auto_resume_check = ttk.Checkbutton(pause_row, text="自动处理走神暂停",
+                                            variable=self.reader_auto_resume_var)
+        auto_resume_check.pack(side="left", padx=(0, 16))
+        self.config_widgets.append(auto_resume_check)
+        ttk.Label(pause_row, text="最多恢复次数").pack(side="left", padx=(0, 6))
+        resume_entry = ttk.Entry(pause_row, textvariable=self.reader_max_resumes_var, width=7)
+        resume_entry.pack(side="left")
+        self.config_widgets.append(resume_entry)
+        ttk.Label(reader_session, textvariable=self.reader_progress_var,
+                  wraplength=960).pack(anchor="w", pady=(12, 0))
+        ttk.Label(reader_session,
+                  text="开始前先识别阅读器，并保持当前文档打开。到达时限、次数上限、文档末页或识别不一致时停止。\n"
+                       "最多翻页次数填 0 可只做本地计时。计时只累计成功识别之间的时间，日志不代表平台已确认阅读学时。\n"
+                       "自动恢复仅处理识别明确的“走神”提示和唯一“继续学习”按钮，恢复后核对同书；暂停停留时间不计入本地阅读。\n"
+                       "运行中请勿手动操作模拟器；需要操作时先点击“停止读书”。本地演示不支持此视觉阅读功能。",
+                  wraplength=960, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
+
         guide_text = (
             "1. 启动雷电，手动登录优学院并打开想查看的课程页面。\n\n"
             "2. 检测设备 → 选择在线设备 → 连接 → 读取当前页面。\n\n"
             "3. 在“页面与资料”导出可见文字；在“操作与采集”预览按钮并执行，或连续翻页采集。\n\n"
+            "4. 求是读书 PDF 请使用独立的“求是读书”标签：先识别书名与页码，再单步验证文档翻页。可按间隔翻页并记录本地阅读时间。\n\n"
             "倍速功能只选择 App 已提供的选项。默认控件名称是示例，真实页面名称不同时请载入自己的 JSON 配置。\n\n"
             "当前版本提供连接、控件操作与可见资料整理。自动答题、自动签到、完整题库、学时写入、互评和 Word/PDF 工具尚未实现。\n\n"
             "没有模拟器时，可以勾选“本地演示”试用；演示里的内容都是虚构示例。"
@@ -261,17 +340,27 @@ class AssistantApp:
                 elif kind == "error":
                     self._set_busy(False)
                     self.stop_button.configure(state="disabled")
+                    self.reader_stop_button.configure(state="disabled")
+                    self.clear_reader_state()
                     self.log(f"未完成：{payload}")
                     messagebox.showerror("操作未完成", payload, parent=self.root)
                 elif kind == "done":
                     result, callback = payload
                     self._set_busy(False)
                     self.stop_button.configure(state="disabled")
+                    self.reader_stop_button.configure(state="disabled")
                     if callback:
                         try:
                             callback(result)
                         except Exception as exc:
                             self.log(f"结果显示失败：{exc}")
+                elif kind == "reader_update":
+                    self.reader_progress_var.set(
+                        f"{payload.get('title', '')} · {payload.get('page', '?')} / {payload.get('total', '?')} 页 · "
+                        f"本地确认计时 {payload.get('elapsed_seconds', 0):.1f} 秒 · "
+                        f"文档翻页 {payload.get('turns', 0)} 次 · "
+                        f"走神恢复 {payload.get('resume_count', 0)} 次 · "
+                        f"暂停 {payload.get('paused_seconds', 0):.1f} 秒 · 平台阅读学时未确认")
         except queue.Empty:
             pass
         self.root.after(80, self._drain)
@@ -279,6 +368,7 @@ class AssistantApp:
     def reset_connection(self) -> None:
         self.client = self.inspector = self.snapshot = self.preview = None
         self.nodes = []
+        self.clear_reader_state()
         self.tree.delete(*self.tree.get_children())
         self.device_combo.configure(values=[])
         self.serial_var.set("")
@@ -287,6 +377,7 @@ class AssistantApp:
     def invalidate_device(self) -> None:
         self.client = self.inspector = self.snapshot = self.preview = None
         self.nodes = []
+        self.clear_reader_state()
         self.tree.delete(*self.tree.get_children())
         self.status_var.set("设备已变更，请点击连接。")
 
@@ -299,6 +390,7 @@ class AssistantApp:
         if path:
             self.adb_var.set(path)
             self.client = self.inspector = self.preview = None
+            self.clear_reader_state()
             self.status_var.set("ADB 程序已变更，请重新连接。")
 
     def browse_output(self) -> None:
@@ -347,6 +439,7 @@ class AssistantApp:
             client, device, info, app = result
             self.client, self.inspector = client, Inspector(client, profile)
             self.preview = self.snapshot = None
+            self.clear_reader_state()
             self.adb_var.set(str(client.adb_path))
             self.device_combo.configure(values=[device.serial])
             self.serial_var.set(device.serial)
@@ -465,6 +558,7 @@ class AssistantApp:
         if self.client:
             self.inspector = Inspector(self.client, profile)
         self.preview = self.snapshot = None
+        self.clear_reader_state()
         self.nodes = []
         self.tree.delete(*self.tree.get_children())
         self.log(f"已载入配置：{Path(path).name}；目标包名 {profile.package}")
@@ -499,8 +593,117 @@ class AssistantApp:
         self.stop_button.configure(state="disabled")
         self.log("已请求停止，当前设备读取结束后退出。")
 
+    def clear_reader_state(self) -> None:
+        self.reader_state = None
+        self.reader_state_var.set("尚未识别 · 在优学院中打开文档后，点击“识别阅读器”")
+
+    def require_reader(self) -> bool:
+        if self.busy or not self.require_connection():
+            return False
+        if self.demo_var.get():
+            self.log("本地演示暂不支持视觉阅读器；请连接雷电并打开真实文档。")
+            return False
+        return True
+
+    def show_reader_state(self, state) -> None:
+        self.reader_state = state
+        self.reader_state_var.set(
+            f"{state.title} · 第 {state.page} / {state.total} 页 · {state.width} × {state.height}")
+        self.preview = None
+
+    def inspect_reader(self) -> None:
+        if not self.require_reader():
+            return
+        client = self.client
+        self.clear_reader_state()
+        def done(state):
+            self.show_reader_state(state)
+            self.log(f"已识别文档：{state.title}，第 {state.page} / {state.total} 页。")
+        self.run_task("识别文档书名与 PDF 页码…", lambda: VisualReader(client).inspect(), done)
+
+    def move_reader(self, direction: int) -> None:
+        if not self.require_reader():
+            return
+        if self.reader_state is None:
+            messagebox.showinfo("先识别阅读器", "请先点击“识别阅读器”，确认当前书名与页码。", parent=self.root)
+            return
+        client, expected = self.client, self.reader_state
+        self.reader_cancel_event = threading.Event()
+        event = self.reader_cancel_event
+        def done(state):
+            self.show_reader_state(state)
+            self.log(f"文档翻页已核对：第 {state.page} / {state.total} 页。")
+        label = "上一页" if direction < 0 else "下一页"
+        self.run_task(f"核对当前文档并翻到文档{label}…",
+                      lambda: VisualReader(client).move(direction, cancel_event=event, expected=expected), done)
+        self.reader_stop_button.configure(state="normal")
+
+    def resume_reader(self) -> None:
+        if not self.require_reader():
+            return
+        client, expected = self.client, self.reader_state
+        self.reader_cancel_event = threading.Event()
+        event = self.reader_cancel_event
+        def done(state):
+            self.show_reader_state(state)
+            self.log(f"走神弹窗已处理并核对文档：{state.title}，第 {state.page} / {state.total} 页。")
+        self.run_task("识别当前走神弹窗并尝试单次恢复…",
+                      lambda: VisualReader(client).resume_pause(expected=expected, cancel_event=event), done)
+        self.reader_stop_button.configure(state="normal")
+
+    def start_reader(self) -> None:
+        if not self.require_reader():
+            return
+        if self.reader_state is None:
+            messagebox.showinfo("先识别阅读器", "请先点击“识别阅读器”，确认当前书名与页码。", parent=self.root)
+            return
+        try:
+            duration = float(self.reader_duration_var.get())
+            interval = float(self.reader_interval_var.get())
+            turns = int(self.reader_turns_var.get())
+            max_resumes = int(self.reader_max_resumes_var.get())
+            if not 1 <= duration <= 3600 or not 1 <= interval <= 300 or not 0 <= turns <= 200:
+                raise ValueError
+            if not 0 <= max_resumes <= 100:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("参数有误", "总时长应为 1–3600 秒；间隔 1–300 秒；最多翻页次数 0–200，0 表示只计时；最多恢复次数 0–100。", parent=self.root)
+            return
+        auto_resume = self.reader_auto_resume_var.get()
+        client, expected = self.client, self.reader_state
+        output = Path(self.output_var.get())
+        self.reader_cancel_event = threading.Event()
+        event = self.reader_cancel_event
+        self.preview = None
+        self.reader_progress_var.set("开始核对当前文档 · 平台阅读学时未确认")
+        def work():
+            reader = VisualReader(client)
+            return reader.run(duration_seconds=duration, turn_interval=interval, max_turns=turns,
+                              auto_resume=auto_resume, max_resumes=max_resumes, expected_start=expected,
+                              cancel_event=event, output_dir=output,
+                              on_update=lambda update: self.events.put(("reader_update", update)))
+        def done(result):
+            if result.last_state is not None and result.stop_reason in {
+                    "duration_limit", "turn_limit", "cancelled", "page_boundary"}:
+                self.show_reader_state(result.last_state)
+            else:
+                self.clear_reader_state()
+            self.reader_progress_var.set(
+                f"已停止 · 本地确认计时 {result.elapsed_seconds:.1f} 秒 · 文档翻页 {result.turns} 次 · "
+                f"走神恢复 {result.resume_count} 次 · 暂停 {result.paused_seconds:.1f} 秒 · 平台阅读学时未确认")
+            reason = READER_STOP_NAMES.get(result.stop_reason, result.stop_reason)
+            self.log(f"读书已停止：{reason}；日志：{result.log_path}")
+        self.run_task("开始本地阅读计时与文档内间隔翻页…", work, done)
+        self.reader_stop_button.configure(state="normal")
+
+    def stop_reader(self) -> None:
+        self.reader_cancel_event.set()
+        self.reader_stop_button.configure(state="disabled")
+        self.log("已请求停止读书；当前识别结束后退出，不再发起后续翻页。")
+
     def _close(self) -> None:
         self.cancel_event.set()
+        self.reader_cancel_event.set()
         self.root.destroy()
 
 

@@ -5,6 +5,7 @@
 | 参考资料 | 用途 |
 | --- | --- |
 | [Android Debug Bridge 官方文档](https://developer.android.com/tools/adb) | ADB 设备通信与命令说明 |
+| [Microsoft Windows OCR 官方文档](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine) | 调用 Windows 自带 OCR，在本机识别截图中的书名、页码与走神提示 |
 | [BrocadeHutHost/DGUT-ULearningTakeQuizzesAssistant](https://github.com/BrocadeHutHost/DGUT-ULearningTakeQuizzesAssistant) | 了解原网页用户脚本的目标功能；本项目不是该脚本的 Android 直接移植 |
 | [openatx/uiautomator2](https://github.com/openatx/uiautomator2) | Android UI 自动化技术参考；本项目当前不依赖该库 |
 | [SuperMonster003/AutoJs6](https://github.com/SuperMonster003/AutoJs6) | Android 端脚本自动化方案参考；本项目当前不依赖该应用 |

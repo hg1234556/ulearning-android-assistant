@@ -172,7 +172,7 @@ class AdbClient:
     def device_info(self) -> dict:
         device = self.select_device()
         output = self._text(self._device_run(["shell", "getprop"]))
-        properties = dict(re.findall(r"^\[([^\]]+)\]: \[(.*?)\]$", output, re.MULTILINE))
+        properties = dict(re.findall(r"^\[([^\]]+)\]: \[(.*?)\]\r?$", output, re.MULTILINE))
         sizes = self._text(self._device_run(["shell", "wm", "size"]))
         matches = re.findall(r"(?:Physical|Override) size:\s*(\d+)x(\d+)", sizes)
         width, height = (tuple(int(value) for value in matches[-1]) if matches else (None, None))
@@ -205,6 +205,15 @@ class AdbClient:
             if match:
                 result[key] = match.group(1).strip()
         return result
+
+    def foreground_package(self) -> str:
+        """Read the resumed Android activity without starting an app or UI service."""
+        output = self._text(self._device_run(["shell", "dumpsys", "activity", "activities"]))
+        for label in ("topResumedActivity", "mResumedActivity", "ResumedActivity"):
+            match = re.search(rf"{label}[^\r\n]*?\bu\d+\s+([A-Za-z_][A-Za-z0-9_.]*)/", output)
+            if match:
+                return match.group(1)
+        raise AdbError("无法确认前台应用，请在模拟器中打开优学院后重试。")
 
     def dump_ui(self) -> list[UiNode]:
         remote_path = f"/data/local/tmp/ulearning-ui-{uuid.uuid4().hex}.xml"

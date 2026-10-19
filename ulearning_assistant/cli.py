@@ -12,6 +12,8 @@ import threading
 from . import __version__
 from .core import AdbClient, AdbError, export_json
 from .demo import DemoClient
+from .ocr import OcrError
+from .reader import ReaderError, VisualReader
 from .workflows import Inspector, PageCollector, Profile, WorkflowError
 
 
@@ -34,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("doctor", "检查设备与优学院安装信息"), ("inspect", "读取当前目标页面的控件"),
         ("export", "导出当前页面的可见文字"), ("action", "预览或执行一个配置动作"),
         ("collect", "限定页数连续翻页采集"),
+        ("reader", "求是读书：识别 PDF 页码、文档内翻页与本地计时"),
     ]:
         command = commands.add_parser(name, help=help_text)
         _options(command, child=True)
@@ -47,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--pages", type=int, default=10)
             command.add_argument("--interval", type=float, default=3.0)
             command.add_argument("--timeout", type=float, default=120.0)
+        elif name == "reader":
+            command.add_argument("action", choices=("status", "next", "previous", "resume", "run"),
+                                 help="识别、文档下一页、文档上一页、处理当前走神弹窗、开始计时并翻页")
+            command.add_argument("--duration", type=float, default=300.0, help="本地总时长，默认 300 秒")
+            command.add_argument("--interval", type=float, default=30.0, help="文档翻页间隔，默认 30 秒")
+            command.add_argument("--turns", type=int, default=10, help="最多翻页次数，默认 10 次；0 表示只计时")
+            command.add_argument("--output", type=Path, default=Path("exports"), help="本地阅读日志目录")
+            command.add_argument("--no-auto-resume", action="store_true", help="运行中发现走神暂停时停止，不自动恢复")
+            command.add_argument("--max-resumes", type=int, default=10, help="运行中最多恢复走神暂停的次数，默认 10 次")
     return parser
 
 
@@ -61,9 +73,41 @@ def main(argv: list[str] | None = None) -> int:
             from .gui import main as gui_main
             gui_main(demo=options.demo, adb=options.adb, serial=options.serial, profile=options.profile)
             return 0
+        if options.command == "reader" and options.demo:
+            print("未完成：本地演示不支持视觉阅读器；请连接雷电并打开真实文档。", file=sys.stderr)
+            return 2
         client = DemoClient() if options.demo else AdbClient(options.adb, serial=options.serial)
         if options.command == "devices":
             _print({"demo": options.demo, "devices": [asdict(d) for d in client.devices()]})
+            return 0
+        if options.command == "reader":
+            reader = VisualReader(client)
+            cancel = threading.Event()
+            if options.action == "status":
+                _print({"state": asdict(reader.inspect()), "platform_confirmed": False})
+            elif options.action == "resume":
+                state = reader.resume_pause(cancel_event=cancel)
+                _print({"state": asdict(state), "resumed": True, "platform_confirmed": False})
+            elif options.action in {"next", "previous"}:
+                expected = reader.inspect()
+                state = reader.move(1 if options.action == "next" else -1,
+                                    cancel_event=cancel, expected=expected)
+                _print({"state": asdict(state), "platform_confirmed": False})
+            else:
+                try:
+                    result = reader.run(duration_seconds=options.duration, turn_interval=options.interval,
+                                        auto_resume=not options.no_auto_resume, max_resumes=options.max_resumes,
+                                        max_turns=options.turns, cancel_event=cancel, output_dir=options.output)
+                except KeyboardInterrupt:
+                    cancel.set()
+                    raise
+                _print({"stop_reason": result.stop_reason, "turns": result.turns,
+                        "elapsed_seconds": result.elapsed_seconds,
+                        "resume_count": result.resume_count, "paused_seconds": result.paused_seconds,
+                        "last_state": asdict(result.last_state) if result.last_state else None,
+                        "log_path": str(result.log_path), "platform_confirmed": False})
+                if result.stop_reason not in {"duration_limit", "turn_limit", "cancelled", "page_boundary"}:
+                    return 2
             return 0
         profile = Profile.load(options.profile)
         if options.command == "doctor":
@@ -96,7 +140,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("已停止；已写入的资料文件会保留。", file=sys.stderr)
         return 130
-    except (AdbError, WorkflowError, ValueError, OSError) as exc:
+    except ReaderError as exc:
+        print(f"未完成：{exc}", file=sys.stderr)
+        if exc.code == "platform_paused":
+            print("已识别走神暂停，本次未点击；可使用 reader resume 处理当前弹窗。", file=sys.stderr)
+        return 2
+    except (AdbError, WorkflowError, OcrError, ValueError, OSError) as exc:
         print(f"未完成：{exc}", file=sys.stderr)
         return 2
 

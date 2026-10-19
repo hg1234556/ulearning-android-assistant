@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ulearning-android-assistant"
-version = "0.1.0"
+version = "0.2.1"
 description = "A Chinese desktop assistant for ULearning on an Android emulator"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,3 +16,6 @@ ulearning-assistant = "ulearning_assistant.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["ulearning_assistant*"]
+
+[tool.setuptools.package-data]
+ulearning_assistant = ["assets/*.ps1"]
